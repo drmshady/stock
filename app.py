@@ -71,7 +71,7 @@ def engineer_features(historical_data, target_period=20, ma_periods=[10, 50], vo
 
             # Calculate Moving Average Convergence Divergence (MACD)
             exp1 = processed_data[ticker]['Close'].ewm(span=macd_periods[0], adjust=False).mean()
-            exp2 = data['Close'].ewm(span=macd_periods[1], adjust=False).mean() # Changed from processed_data[ticker]['Close'] to data['Close']
+            exp2 = processed_data[ticker]['Close'].ewm(span=macd_periods[1], adjust=False).mean()
             processed_data[ticker]['MACD'] = exp1 - exp2
             processed_data[ticker]['MACD_Signal'] = processed_data[ticker]['MACD'].ewm(span=macd_periods[2], adjust=False).mean()
 
@@ -141,6 +141,21 @@ def load_all_models():
         print("Unified RF model not found.")
 
     return loaded_models, loaded_lstm_models, loaded_unified_model
+
+# Define weighted averaging ensemble prediction logic (single prediction)
+def weighted_average_ensemble_predict(rf_prediction, lstm_prediction, rf_mse, lstm_mse):
+    """
+    Combines single predictions using weighted averaging based on inverse MSE.
+    """
+    # Avoid division by zero if MSE is 0 (unlikely but good practice)
+    rf_weight = 1 / rf_mse if rf_mse > 0 else 1
+    lstm_weight = 1 / lstm_mse if lstm_mse > 0 else 1
+
+    total_weight = rf_weight + lstm_weight
+
+    weighted_prediction = (rf_prediction * rf_weight + lstm_prediction * lstm_weight) / total_weight
+
+    return weighted_prediction
 
 
 def evaluate_models_on_tickers(tickers, trained_models, trained_lstm_models, unified_model, lookback_period):
@@ -586,8 +601,8 @@ def predict():
                 tickers,
                 trained_models, # Pass loaded models
                 trained_lstm_models, # Pass loaded LSTM models
-                None, # individual_rf_models_mse will be calculated dynamically
-                None, # lstm_models_mse will be calculated dynamically
+                # individual_rf_models_mse, # These are now calculated dynamically inside get_stock_predictions
+                # lstm_models_mse, # These are now calculated dynamically inside get_stock_predictions
                 unified_model, # Pass loaded unified model
                 unified_model_features, # Pass unified model features
                 LOOKBACK_PERIOD
