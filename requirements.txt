@@ -1,8 +1,0 @@
-Flask
-pandas
-yfinance
-scikit-learn
-tensorflow
-gspread
-gspread-dataframe
-google-auth
