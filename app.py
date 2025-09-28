@@ -97,20 +97,21 @@ def create_sequences(data, lookback_period):
     return {'latest_sequence': latest_sequence}
 
 
-def load_models(tickers):
-    """Loads trained models from disk."""
+def load_all_models():
+    """Loads all trained models from disk based on available files."""
     loaded_models = {}
     loaded_lstm_models = {}
     loaded_unified_model = None
 
-    # Load individual RF models
-    for ticker in tickers:
-        model_filename = os.path.join(RF_MODEL_DIR, f'rf_model_{ticker}.pkl')
-        if os.path.exists(model_filename):
-            try:
-                loaded_models[ticker] = joblib.load(model_filename)
-            except Exception as e:
-                print(f"Error loading RF model for {ticker}: {e}")
+    # Get list of available individual RF models
+    rf_model_files = [f for f in os.listdir(RF_MODEL_DIR) if f.endswith('.pkl')]
+    for model_file in rf_model_files:
+        ticker = model_file.replace('rf_model_', '').replace('.pkl', '')
+        model_filename = os.path.join(RF_MODEL_DIR, model_file)
+        try:
+            loaded_models[ticker] = joblib.load(model_filename)
+        except Exception as e:
+            print(f"Error loading RF model for {ticker} from {model_file}: {e}")
 
 
     # Load unified RF model
@@ -118,42 +119,266 @@ def load_models(tickers):
         try:
             loaded_unified_model = joblib.load(UNIFIED_RF_MODEL_PATH)
         except Exception as e:
-             print(f"Error loading unified RF model: {e}")
+             print(f"Error loading unified RF model from {UNIFIED_RF_MODEL_PATH}: {e}")
 
 
-    # Load individual LSTM models
-    for ticker in tickers:
-        model_filename = os.path.join(LSTM_MODEL_DIR, f'lstm_model_{ticker}.keras')
-        if os.path.exists(model_filename):
-            try:
-                # Custom objects might be needed if custom layers were used
-                loaded_lstm_models[ticker] = tf.keras.models.load_model(model_filename)
-            except Exception as e:
-                print(f"Error loading LSTM model for {ticker}: {e}")
+    # Get list of available individual LSTM models
+    lstm_model_files = [f for f in os.listdir(LSTM_MODEL_DIR) if f.endswith('.keras')]
+    for model_file in lstm_model_files:
+        ticker = model_file.replace('lstm_model_', '').replace('.keras', '')
+        model_filename = os.path.join(LSTM_MODEL_DIR, model_file)
+        try:
+            # Custom objects might be needed if custom layers were used
+            loaded_lstm_models[ticker] = tf.keras.models.load_model(model_filename)
+        except Exception as e:
+            print(f"Error loading LSTM model for {ticker} from {model_file}: {e}")
+
+    print(f"\nLoaded {len(loaded_models)} individual RF models.")
+    print(f"Loaded {len(loaded_lstm_models)} individual LSTM models.")
+    if loaded_unified_model:
+        print("Loaded unified RF model.")
+    else:
+        print("Unified RF model not found.")
 
     return loaded_models, loaded_lstm_models, loaded_unified_model
 
-# Define weighted averaging ensemble prediction logic (single prediction)
-def weighted_average_ensemble_predict(rf_prediction, lstm_prediction, rf_mse, lstm_mse):
+
+def evaluate_models_on_tickers(tickers, trained_models, trained_lstm_models, unified_model, lookback_period):
     """
-    Combines single predictions using weighted averaging based on inverse MSE.
+    Evaluates the performance of trained models on the test set for specified tickers
+    to get MSEs needed for weighted ensemble calculation.
+    This requires retrieving and processing historical data for the tickers.
     """
-    # Avoid division by zero if MSE is 0 (unlikely but good practice)
-    rf_weight = 1 / rf_mse if rf_mse > 0 else 1
-    lstm_weight = 1 / lstm_mse if lstm_mse > 0 else 1
-
-    total_weight = rf_weight + lstm_weight
-
-    weighted_prediction = (rf_prediction * rf_weight + lstm_prediction * lstm_weight) / total_weight
-
-    return weighted_prediction
+    individual_rf_models_mse = {}
+    lstm_models_mse = {}
+    weighted_ensemble_models_mse = {}
 
 
-def get_stock_predictions(ticker_list, trained_models, trained_lstm_models, individual_rf_models_mse, lstm_models_mse, unified_model, unified_model_features, lookback_period):
+    # Retrieve and process historical data for the specified tickers for evaluation
+    historical_data_eval = retrieve_historical_data(tickers)
+    processed_data_eval = engineer_features(historical_data_eval)
+
+    time_series_data_sequences_eval = {}
+    for ticker, data in processed_data_eval.items():
+         if not data.empty and len(data) > lookback_period:
+              sequences_and_targets = create_sequences_for_evaluation(data, lookback_period) # Use full create_sequences for eval
+              time_series_data_sequences_eval[ticker] = sequences_and_targets
+
+
+    # Prepare unified data for evaluation test set for the specified tickers
+    all_stocks_data_eval = []
+    for ticker, data in processed_data_eval.items():
+        data_with_ticker = data.copy()
+        data_with_ticker['Ticker'] = ticker # Add ticker back for unified model
+        all_stocks_data_eval.append(data_with_ticker)
+
+    if all_stocks_data_eval:
+        unified_data_eval = pd.concat(all_stocks_data_eval)
+        # Drop the 'Ticker' column for training as it's not a numerical feature for the model
+        X_unified_eval = unified_data_eval.drop(['Price_Change_Next_Month', 'Ticker'], axis=1)
+        y_unified_eval = unified_data_eval['Price_Change_Next_Month']
+
+        if len(unified_data_eval) > 1:
+            # Split the data into training and testing sets for the unified model (used for evaluation)
+            # Use a consistent random_state for reproducibility
+            X_train_unified, X_test_unified, y_train_unified, y_test_unified = train_test_split(X_unified_eval, y_unified_eval, test_size=0.2, random_state=42)
+            test_sets_eval = {'unified': (X_test_unified, y_test_unified)}
+        else:
+             print("Not enough data to create unified test set for evaluation.")
+             test_sets_eval = {'unified': (None, None)}
+    else:
+         print("No data available to create unified data for evaluation.")
+         test_sets_eval = {'unified': (None, None)}
+
+
+    X_test_unified, y_test_unified = test_sets_eval['unified']
+
+
+    # Evaluate individual RandomForestRegressor models
+    print("\nEvaluating individual Random Forest models for requested tickers...")
+    for ticker, model in trained_models.items():
+        if ticker in processed_data_eval and not processed_data_eval[ticker].empty and X_test_unified is not None: # Check if data and unified test set are available
+            # Get the test data for the current ticker
+            ticker_data = processed_data_eval[ticker]
+
+            # Find the indices that are in both the ticker data's index and the unified X_test index
+            test_indices = X_test_unified.index.intersection(ticker_data.index)
+
+            if not test_indices.empty:
+                try:
+                    X_individual_test = ticker_data.loc[test_indices].drop('Price_Change_Next_Month', axis=1)
+                    y_individual_test = ticker_data.loc[test_indices, 'Price_Change_Next_Month']
+
+                    # Get the column names from processed_data_eval[ticker], excluding the target column tuple
+                    individual_model_features = [col for col in processed_data_eval[ticker].columns if col != ('Price_Change_Next_Month', '')]
+                    if ('Price_Change_Next_Month', '') not in processed_data_eval[ticker].columns: # Fallback if not MultiIndex
+                         individual_model_features = [col for col in processed_data_eval[ticker].columns if col != 'Price_Change_Next_Month']
+
+
+                    # Select only the feature columns for the latest data using the individual model's feature names
+                    X_individual_test = X_individual_test[individual_model_features]
+
+                    # Predict on the individual ticker's test data
+                    individual_predictions = model.predict(X_individual_test)
+
+                    # Calculate MSE for the individual model
+                    mse = mean_squared_error(y_individual_test, individual_predictions)
+                    individual_rf_models_mse[ticker] = mse
+                except Exception as e:
+                    print(f"Error evaluating individual RF model for {ticker}: {e}")
+            # else:
+            #     print(f"No test data available in the unified test set for {ticker} for individual RF evaluation.")
+
+    print("Individual Random Forest model evaluation complete.")
+
+
+    # Evaluate individual LSTM models
+    print("\nEvaluating individual LSTM models for requested tickers...")
+    for ticker, model in trained_lstm_models.items():
+        if ticker in time_series_data_sequences_eval:
+            X_lstm, y_lstm = time_series_data_sequences_eval[ticker]['sequences'], time_series_data_sequences_eval[ticker]['targets']
+            # Split the data again to get the same test set as used during training (if applicable)
+            # Use the same random_state and test_size as the unified split for consistency
+            if X_lstm.shape[0] > 0:
+                _, X_test_lstm, _, y_test_lstm = train_test_split(X_lstm, y_lstm, test_size=0.2, random_state=42)
+
+
+                if X_test_lstm.shape[0] > 0:
+                    try:
+                        # Evaluate the model on the test data
+                        loss = model.evaluate(X_test_lstm, y_test_lstm, verbose=0)
+                        lstm_models_mse[ticker] = loss
+                        # print(f"{ticker} LSTM Model MSE: {loss:.6f}")
+                    except Exception as e:
+                         print(f"Error evaluating individual LSTM model for {ticker}: {e}")
+                # else:
+                #     print(f"No test data available for {ticker} for evaluation.")
+            # else:
+            #     print(f"No time-series sequences available for {ticker} for evaluation.")
+
+    print("Individual LSTM model evaluation complete.")
+
+    # --- Evaluate Weighted Averaging Ensemble ---
+    def weighted_average_ensemble_eval(rf_predictions, lstm_predictions, rf_mse, lstm_mse):
+      """
+      Combines predictions using weighted averaging based on inverse MSE.
+      """
+      # Avoid division by zero if MSE is 0 (unlikely but good practice)
+      rf_weight = 1 / rf_mse if rf_mse > 0 else 1
+      lstm_weight = 1 / lstm_mse if lstm_mse > 0 else 1
+
+      total_weight = rf_weight + lstm_weight
+
+      # Calculate weighted average
+      weighted_predictions = (rf_predictions * rf_weight + lstm_predictions * lstm_weight) / total_weight
+
+      return weighted_predictions
+
+    print("\nEvaluating Weighted Averaging Ensemble for requested tickers...")
+    for ticker in tickers: # Iterate through requested tickers
+        if ticker in individual_rf_models_mse and ticker in lstm_models_mse and ticker in processed_data_eval: # Check if MSEs and processed data exist
+            # Get the test data and true values for the current ticker
+            ticker_data = processed_data_eval[ticker]
+            if X_test_unified is not None:
+                test_indices = X_test_unified.index.intersection(ticker_data.index)
+
+                if not test_indices.empty:
+                    try:
+                        y_true_test = ticker_data.loc[test_indices, 'Price_Change_Next_Month']
+
+                        # Get predictions from the individual Random Forest model on the test set
+                        rf_model = trained_models[ticker]
+                        X_individual = ticker_data.drop('Price_Change_Next_Month', axis=1)
+                        individual_model_features = [col for col in processed_data_eval[ticker].columns if col != ('Price_Change_Next_Month', '')]
+                        if ('Price_Change_Next_Month', '') not in processed_data_eval[ticker].columns: # Fallback if not MultiIndex
+                             individual_model_features = [col for col in processed_data_eval[ticker].columns if col != 'Price_Change_Next_Month']
+
+                        X_individual_test = X_individual.loc[test_indices][individual_model_features]
+                        rf_predictions_test = trained_models[ticker].predict(X_individual_test) # Use model from trained_models dict
+
+                        # Get predictions from the individual LSTM model on the test set
+                        lstm_model = trained_lstm_models[ticker]
+                        if ticker in time_series_data_sequences_eval:
+                             X_lstm, y_lstm = time_series_data_sequences_eval[ticker]['sequences'], time_series_data_sequences_eval[ticker]['targets']
+                             if X_lstm.shape[0] > 0:
+                                _, X_test_lstm, _, y_test_lstm = train_test_split(X_lstm, y_lstm, test_size=0.2, random_state=42)
+                                lstm_predictions_test = trained_lstm_models[ticker].predict(X_test_lstm).flatten() # Use model from trained_lstm_models dict
+                             else:
+                                 lstm_predictions_test = np.array([]) # Empty array if no sequences
+                        else:
+                            lstm_predictions_test = np.array([]) # Empty array if no sequences
+
+
+                        # Get the MSEs for weighting
+                        rf_mse = individual_rf_models_mse[ticker]
+                        lstm_mse = lstm_models_mse[ticker]
+
+                        # Apply the weighted averaging ensemble
+                        min_len_pred = min(len(rf_predictions_test), len(lstm_predictions_test))
+                        if min_len_pred > 0:
+                             weighted_predictions = weighted_average_ensemble_eval(
+                                 rf_predictions_test[:min_len_pred],
+                                 lstm_predictions_test[:min_len_pred],
+                                 rf_mse,
+                                 lstm_mse
+                             )
+
+                             # Store the weighted ensemble predictions for the test set
+                             # weighted_ensemble_predictions_test[ticker] = weighted_predictions # This dictionary is local
+
+                             # Evaluate the weighted ensemble predictions using MSE
+                             min_len_eval = min(len(y_true_test), len(weighted_predictions))
+                             weighted_ensemble_models_mse[ticker] = mean_squared_error(y_true_test[:min_len_eval], weighted_predictions[:min_len_eval])
+                        else:
+                            print(f"Not enough test predictions for weighted ensemble evaluation for {ticker}.")
+
+
+                    except Exception as e:
+                         print(f"Error evaluating weighted ensemble for {ticker}: {e}")
+
+            # else:
+            #     print(f"No test data available in the unified test set for {ticker} for weighted ensemble evaluation.")
+        # else:
+        #      print(f"Missing MSEs or processed data for weighted ensemble evaluation for {ticker}.")
+
+
+    print("Weighted Averaging Ensemble evaluation complete for requested tickers.")
+
+    return individual_rf_models_mse, lstm_models_mse, weighted_ensemble_models_mse
+
+
+# Helper function for create_sequences specifically for evaluation (needs targets)
+def create_sequences_for_evaluation(data, lookback_period):
+    """
+    Creates time-series sequences and targets for evaluation.
+    """
+    X, y = [], []
+    feature_data = data.drop('Price_Change_Next_Month', axis=1)
+    feature_names = feature_data.columns.tolist()
+
+    for i in range(len(data) - lookback_period):
+        x_sequence = feature_data.iloc[i:(i + lookback_period)][feature_names].values
+        y_target = data['Price_Change_Next_Month'].iloc[i + lookback_period]
+
+        X.append(x_sequence)
+        y.append(y_target)
+
+    return {'sequences': np.array(X), 'targets': np.array(y)}
+
+
+def get_stock_predictions(ticker_list, trained_models, trained_lstm_models, unified_model, unified_model_features, lookback_period):
     """
     Retrieves latest data for a list of tickers, makes predictions using the weighted ensemble or unified model, and returns predictions.
+    This version dynamically calculates MSEs for weighted ensemble for the requested tickers.
     """
     latest_predictions = {}
+
+    # Evaluate models for the requested tickers to get the necessary MSEs for the weighted ensemble
+    # This needs to happen each time predictions are requested
+    individual_rf_models_mse, lstm_models_mse, weighted_ensemble_models_mse = evaluate_models_on_tickers(
+        ticker_list, trained_models, trained_lstm_models, unified_model, lookback_period
+        )
+
 
     # Retrieve and process latest historical data for the specified tickers
     historical_data_latest = retrieve_historical_data(ticker_list)
@@ -169,17 +394,15 @@ def get_stock_predictions(ticker_list, trained_models, trained_lstm_models, indi
                     latest_data = processed_data_latest[ticker].tail(1).copy()
 
                     # Try to use the weighted ensemble if models and MSEs are available for this ticker
-                    if ticker in trained_models and ticker in trained_lstm_models and ticker in individual_rf_models_mse and lstm_models_mse is not None and ticker in lstm_models_mse: # Added check for lstm_models_mse being None
+                    if ticker in trained_models and ticker in trained_lstm_models and ticker in individual_rf_models_mse and ticker in lstm_models_mse:
                         try:
                            # --- Get latest predictions from Individual Random Forest model ---
                            rf_model = trained_models[ticker]
                            X_individual_latest = latest_data.drop('Price_Change_Next_Month', axis=1)
 
-                           # Get the column names from processed_data[ticker], excluding the target column tuple
-                           # Need to handle potential MultiIndex here if feature engineering created one
+                           # Get the column names from processed_data_latest[ticker]
                            individual_model_features = [col for col in processed_data_latest[ticker].columns if col != ('Price_Change_Next_Month', '')] # Assuming MultiIndex target
-                           # Fallback if not MultiIndex
-                           if ('Price_Change_Next_Month', '') not in processed_data_latest[ticker].columns:
+                           if ('Price_Change_Next_Month', '') not in processed_data_latest[ticker].columns: # Fallback if not MultiIndex
                                 individual_model_features = [col for col in processed_data_latest[ticker].columns if col != 'Price_Change_Next_Month']
 
 
@@ -193,7 +416,7 @@ def get_stock_predictions(ticker_list, trained_models, trained_lstm_models, indi
                            # Prepare the latest data for LSTM prediction (needs to be a sequence)
                            # Use full processed data to create the latest sequence
                            if len(processed_data_latest[ticker]) >= lookback_period:
-                               lstm_sequence_data = create_sequences(processed_data_latest[ticker], lookback_period)
+                               lstm_sequence_data = create_sequences(processed_data_latest[ticker], lookback_period) # Use simplified create_sequences
                                lstm_latest_data_sequence = lstm_sequence_data['latest_sequence']
 
                                if lstm_latest_data_sequence is not None:
@@ -301,139 +524,43 @@ def rank_stocks(predictions):
     return ranked_stocks
 
 # --- Initial Loading and Evaluation (needed for Flask app to have models and MSEs) ---
-# We load ALL tickers initially to train/load models and evaluate them.
-# This is needed to have the models and their performance metrics (MSEs) available
-# for the weighted ensemble prediction logic when a user requests predictions for a subset of tickers.
-# In a production environment, training/evaluation might be a separate process.
-
-# For simplicity in this example, we load all tickers from the file initially to ensure
-# the models and MSEs are populated for the prediction function.
-# The prediction function itself will then fetch data only for the requested tickers.
-
-# Define the path to the stock list file
-STOCK_LIST_FILE = 'filtered_sp500_stocks.csv' # Use local path in container
-
-# Load stock ticker data from the file for initial model loading/training
-stock_df = None
-all_tickers = []
-try:
-    stock_df = pd.read_csv(STOCK_LIST_FILE)
-    if stock_df is not None and not stock_df.empty:
-        all_tickers = stock_df['Ticker'].tolist()
-except FileNotFoundError:
-    print(f"Error: Initial stock list file not found at {STOCK_LIST_FILE}. Cannot load/train models.")
-    all_tickers = [] # Set empty list if file not found
-
-# Attempt to load trained models for all tickers
-trained_models = {}
-trained_lstm_models = {}
-unified_model = None
-if all_tickers:
-    trained_models, trained_lstm_models, unified_model = load_models(all_tickers)
-
-# Check if all models are loaded for all initial tickers
-all_initial_models_loaded = True
-if unified_model is None:
-    all_initial_models_loaded = False
-for ticker in all_tickers:
-    if ticker not in trained_models or ticker not in trained_lstm_models:
-        all_initial_models_loaded = False
-        break
+# Load all available models at startup
+print("Loading all available models at application startup...")
+trained_models, trained_lstm_models, unified_model = load_all_models()
 
 # Get unified model features if unified model is available (needed for prediction)
 unified_model_features = None
-# We need to re-create X_unified from the training data to get feature names
-# This assumes the processed_data for the initial tickers is available
-try:
-    # Retrieve and process historical data for all initial tickers for evaluation purposes if models are not loaded
-    # or to get feature names if models were loaded but processed_data wasn't kept
-    if 'processed_data_initial' not in locals() or not processed_data_initial:
-         print("\nRetrieving and processing historical data for initial setup (features and evaluation)...")
-         historical_data_initial = retrieve_historical_data(all_tickers)
-         processed_data_initial = engineer_features(historical_data_initial)
-         time_series_data_sequences_initial = {}
-         for ticker, data in processed_data_initial.items():
-              if not data.empty and len(data) > LOOKBACK_PERIOD:
-                   sequences_and_targets = create_sequences(data, LOOKBACK_PERIOD)
-                   time_series_data_sequences_initial[ticker] = sequences_and_targets
-
-    all_stocks_data_unified_features = []
-    if processed_data_initial:
-        for ticker, data in processed_data_initial.items():
-            data_with_ticker = data.copy()
-            data_with_ticker['Ticker'] = ticker
-            all_stocks_data_unified_features.append(data_with_ticker)
-
-        if all_stocks_data_unified_features:
-            unified_data_features = pd.concat(all_stocks_data_unified_features)
-            # Drop the 'Ticker' column for training as it's not a numerical feature for the model
-            X_unified_features = unified_data_features.drop(['Price_Change_Next_Month', 'Ticker'], axis=1)
-            unified_model_features = X_unified_features.columns.tolist()
-            print("Unified model feature names extracted.")
+# We need to get the feature names that the unified model was trained on.
+# A robust solution would save/load feature names with the model.
+# For this example, we'll attempt to infer them if the unified model is loaded,
+# assuming a consistent feature set from the training data structure.
+if unified_model:
+    try:
+        # Create a dummy DataFrame with the expected feature columns
+        # This requires knowing the feature names without loading historical data
+        # A better approach would be to save/load feature names with the model
+        # For simplicity, let's assume a fixed set of feature names based on engineer_features function
+        dummy_data = pd.DataFrame(0, index=[0], columns=['Open', 'High', 'Low', 'Close', 'Volume',
+                                                        'MA_10', 'MA_50', 'Volatility', 'RSI', 'MACD', 'MACD_Signal'])
+        # Engineer features on dummy data to get expected column names (including MultiIndex if applicable)
+        dummy_processed_data = engineer_features({'dummy_ticker': dummy_data}, target_period=20)
+        if 'dummy_ticker' in dummy_processed_data and not dummy_processed_data['dummy_ticker'].empty:
+             # Get column names, flattening MultiIndex if it exists
+             feature_columns = dummy_processed_data['dummy_ticker'].drop('Price_Change_Next_Month', axis=1).columns
+             unified_model_features = ['_'.join(col).strip() if isinstance(col, tuple) else col.strip() for col in feature_columns]
+             print("Unified model feature names inferred.")
         else:
-            print("No data available to extract unified model feature names.")
-
-except Exception as e:
-    print(f"Error getting unified model feature names: {e}")
-    unified_model_features = None
+            print("Could not infer unified model feature names from dummy data.")
 
 
-if all_initial_models_loaded:
-    print("\nSuccessfully loaded all initial models. Skipping training.")
-
-    # We still need processed_data and time_series_data for evaluation
-    # Retrieve and process data for all initial tickers for evaluation purposes
-    # This was done above to get features, so reuse processed_data_initial and time_series_data_sequences_initial
-
-    # Prepare unified data for evaluation test set
-    unified_data_eval = pd.concat([processed_data_initial[ticker].copy().assign(Ticker=ticker) for ticker in processed_data_initial if not processed_data_initial[ticker].empty])
-    X_unified_eval = unified_data_eval.drop(['Price_Change_Next_Month', 'Ticker'], axis=1)
-    y_unified_eval = unified_data_eval['Price_Change_Next_Month']
-
-    # Split the data into training and testing sets for the unified model (used for evaluation)
-    # This split defines the test set dates used for evaluating all models
-    X_train_unified, X_test_unified, y_train_unified, y_test_unified = train_test_split(X_unified_eval, y_unified_eval, test_size=0.2, random_state=42)
-    test_sets_initial = {'unified': (X_test_unified, y_test_unified)}
-
-    # Evaluate loaded models to get MSEs for weighted ensemble
-    print("\nEvaluating loaded models to get MSEs for weighted ensemble weights...")
-    unified_mse, individual_rf_models_mse, lstm_models_mse, ensemble_models_mse, weighted_ensemble_models_mse = evaluate_models(
-        trained_models, trained_lstm_models, unified_model, test_sets_initial, processed_data_initial, time_series_data_sequences_initial # Pass sequences data for LSTM eval
-        )
-    print("Initial model evaluation complete.")
+    except Exception as e:
+        print(f"Error inferring unified model feature names: {e}")
+        unified_model_features = None
 
 
-else:
-    print("\nOne or more initial models not found. Training models for all tickers...")
-    # Retrieve and process historical data for training
-    # This was done above to get features, so reuse processed_data_initial and time_series_data_sequences_initial
-
-    # Train the models for all initial tickers
-    trained_models, trained_lstm_models, unified_model, test_sets_initial = train_models(processed_data_initial, time_series_data_sequences_initial, LOOKBACK_PERIOD)
-
-    # Get unified model features after training (needed for prediction)
-    if unified_model and test_sets_initial and 'unified' in test_sets_initial and test_sets_initial['unified'][0] is not None:
-        unified_model_features = test_sets_initial['unified'][0].columns.tolist() # Use training data features
-
-
-    # Evaluate the trained models to get MSEs for weighted ensemble
-    unified_mse, individual_rf_models_mse, lstm_models_mse, ensemble_models_mse, weighted_ensemble_models_mse = evaluate_models(
-        trained_models, trained_lstm_models, unified_model, test_sets_initial, processed_data_initial, time_series_data_sequences_initial
-        )
-
-    # Save the trained models (already done in train_models, but explicitly here for clarity)
-    # print("\nSaving trained models...")
-    # for ticker, model in trained_models.items():
-    #      model_filename = os.path.join(RF_MODEL_DIR, f'rf_model_{ticker}.pkl')
-    #      joblib.dump(model, model_filename)
-
-    # if unified_model:
-    #      joblib.dump(unified_model, UNIFIED_RF_MODEL_PATH)
-
-    # for ticker, model in trained_lstm_models.items():
-    #      model_filename = os.path.join(LSTM_MODEL_DIR, f'lstm_model_{ticker}.keras')
-    #      model.save(model_filename)
-    # print("Models saved.")
+# We no longer need to load initial processed data or perform initial evaluation here,
+# as data fetching and evaluation for weighted ensemble MSEs will happen dynamically
+# within get_stock_predictions for the tickers requested by the user.
 
 
 # --- Flask Application ---
@@ -455,18 +582,19 @@ def predict():
             # Make predictions using the weighted averaging ensemble or unified model for the user-provided tickers
             predictions_dict = get_stock_predictions(
                 tickers,
-                trained_models,
-                trained_lstm_models,
-                individual_rf_models_mse,
-                lstm_models_mse,
-                unified_model,
-                unified_model_features,
+                trained_models, # Pass loaded models
+                trained_lstm_models, # Pass loaded LSTM models
+                None, # individual_rf_models_mse will be calculated dynamically
+                None, # lstm_models_mse will be calculated dynamically
+                unified_model, # Pass loaded unified model
+                unified_model_features, # Pass unified model features
                 LOOKBACK_PERIOD
                 )
 
             # Rank the predictions before passing to the template
             ranked_predictions_df = None
             if predictions_dict:
+                # The predictions_dict now contains {'Predicted_Price_Change': value, 'Source': source}
                 ranked_predictions_df = rank_stocks(predictions_dict)
 
 
