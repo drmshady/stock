@@ -21,7 +21,8 @@
                     <tr>
                         <th>Ticker</th>
                         <th>Predicted Price Change</th>
-                        <th>Source Model</th> {# Add column header for source model #}
+                        <th>Confidence Interval (95%)</th> {# Add column header for confidence interval #}
+                        <th>Source Model</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -29,6 +30,13 @@
                     <tr>
                         <td>{{ ticker }}</td>
                         <td>{{ "%.6f" | format(data['Predicted_Price_Change']) if data['Predicted_Price_Change'] is not none else 'N/A' }}</td> {# Format prediction and handle NaN #}
+                        <td>
+                            {% if data['Confidence_Interval'] and data['Confidence_Interval'][0] is not none and data['Confidence_Interval'][1] is not none %}
+                                {{ "%.6f" | format(data['Confidence_Interval'][0]) }} to {{ "%.6f" | format(data['Confidence_Interval'][1]) }}
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td> {# Display the confidence interval and handle NaN #}
                         <td>{{ data['Source'] }}</td> {# Display the source model #}
                     </tr>
                     {% endfor %}
