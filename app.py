@@ -574,6 +574,8 @@ def home():
 def predict():
     predictions = None
     tickers_input = ''
+    # Initialize ranked_predictions_df to None for GET requests
+    ranked_predictions_df = None
     if request.method == 'POST':
         tickers_input = request.form.get('tickers')
         if tickers_input:
@@ -592,7 +594,6 @@ def predict():
                 )
 
             # Rank the predictions before passing to the template
-            ranked_predictions_df = None
             if predictions_dict:
                 # The predictions_dict now contains {'Predicted_Price_Change': value, 'Source': source}
                 ranked_predictions_df = rank_stocks(predictions_dict)
