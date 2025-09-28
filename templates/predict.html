@@ -21,13 +21,15 @@
                     <tr>
                         <th>Ticker</th>
                         <th>Predicted Price Change</th>
+                        <th>Source Model</th> {# Add column header for source model #}
                     </tr>
                 </thead>
                 <tbody>
                     {% for ticker, data in predictions.items() %}
                     <tr>
                         <td>{{ ticker }}</td>
-                        <td>{{ "%.6f" | format(data['Predicted_Price_Change']) }}</td>
+                        <td>{{ "%.6f" | format(data['Predicted_Price_Change']) if data['Predicted_Price_Change'] is not none else 'N/A' }}</td> {# Format prediction and handle NaN #}
+                        <td>{{ data['Source'] }}</td> {# Display the source model #}
                     </tr>
                     {% endfor %}
                 </tbody>

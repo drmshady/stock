@@ -11,9 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code into the container
 COPY . .
 
-# Copy the stock list file into the container
-COPY /content/filtered_sp500_stocks.csv /app/filtered_sp500_stocks.csv
-
 # Create directories for models if they don't exist
 RUN mkdir -p trained_rf_models trained_lstm_models
 
