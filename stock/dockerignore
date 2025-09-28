@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.ipynb
+.vscode
+.env
+data/
+# Do not ignore model directories as we need to copy saved models into the image
+# models/
+# trained_rf_models/
+# trained_lstm_models/
+# unified_rf_model.pkl
+*.csv
+*.xlsx
+*.h5 # Still include HDF5 just in case, but prefer .keras
