@@ -34,6 +34,18 @@
                     {% endfor %}
                 </tbody>
             </table>
+
+            {# Display Plots #}
+            <h2>Prediction Plots</h2>
+            {% for ticker, plot_url in plot_urls.items() %}
+                {% if plot_url %}
+                    <h3>{{ ticker }} Plot</h3>
+                    <img src="{{ plot_url }}" alt="Stock Price Prediction Plot for {{ ticker }}" style="max-width: 100%; height: auto;">
+                {% else %}
+                    <p>Plot not available for {{ ticker }}.</p>
+                {% endif %}
+            {% endfor %}
+
         {% else %}
             <p>No valid predictions were made for the entered tickers.</p>
         {% endif %}

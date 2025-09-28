@@ -11,22 +11,27 @@ import warnings
 import os # Import os for path handling and checking for saved models
 import joblib # Import joblib for saving and loading scikit-learn models
 import tensorflow as tf # Import tensorflow for saving and loading Keras models
+import matplotlib.pyplot as plt # Import matplotlib for plotting
+import io # Import io for handling image data
+import base64 # Import base64 for encoding images
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
 tf.get_logger().setLevel('ERROR') # Suppress TensorFlow warnings
 
 
-# Define paths for saving models
+# Define paths for saving models and plots
 RF_MODEL_DIR = 'trained_rf_models'
 LSTM_MODEL_DIR = 'trained_lstm_models'
 UNIFIED_RF_MODEL_PATH = 'unified_rf_model.pkl'
 LOOKBACK_PERIOD = 30 # Define the lookback period for LSTM sequences
+PLOT_DIR = 'static/plots' # Directory to save plots
 
 
-# Ensure model directories exist (for loading models)
+# Ensure model and plot directories exist (for loading models and saving plots)
 os.makedirs(RF_MODEL_DIR, exist_ok=True)
 os.makedirs(LSTM_MODEL_DIR, exist_ok=True)
+os.makedirs(PLOT_DIR, exist_ok=True)
 
 
 # --- Include the necessary functions from the prediction script ---
@@ -591,6 +596,7 @@ def predict():
     tickers_input = ''
     # Initialize ranked_predictions_df to None for GET requests
     ranked_predictions_df = None
+    plot_urls = {} # Dictionary to store plot URLs or base64 encoded images
     if request.method == 'POST':
         tickers_input = request.form.get('tickers')
         if tickers_input:
@@ -601,8 +607,6 @@ def predict():
                 tickers,
                 trained_models, # Pass loaded models
                 trained_lstm_models, # Pass loaded LSTM models
-                # individual_rf_models_mse, # These are now calculated dynamically inside get_stock_predictions
-                # lstm_models_mse, # These are now calculated dynamically inside get_stock_predictions
                 unified_model, # Pass loaded unified model
                 unified_model_features, # Pass unified model features
                 LOOKBACK_PERIOD
@@ -610,11 +614,65 @@ def predict():
 
             # Rank the predictions before passing to the template
             if predictions_dict:
-                # The predictions_dict now contains {'Predicted_Price_Change': value, 'Source': source}
                 ranked_predictions_df = rank_stocks(predictions_dict)
 
+                # Generate plots for each predicted ticker
+                for ticker, data in predictions_dict.items():
+                    if not np.isnan(data['Predicted_Price_Change']):
+                        # Retrieve historical data for plotting (last 60 days)
+                        historical_data_plot = retrieve_historical_data([ticker], period='60d')
 
-    return render_template('predict.html', predictions=ranked_predictions_df.to_dict('index') if ranked_predictions_df is not None else None, tickers=tickers_input if request.method == 'POST' else '')
+                        if ticker in historical_data_plot and not historical_data_plot[ticker].empty:
+                             historical_prices = historical_data_plot[ticker]['Close']
+                             last_date = historical_prices.index[-1]
+                             last_price = historical_prices.iloc[-1]
+                             predicted_change = data['Predicted_Price_Change']
+
+                             # Calculate predicted price
+                             predicted_price = last_price * (1 + predicted_change)
+
+                             # Determine future date for prediction (e.g., 20 trading days later)
+                             # This is a simplified approximation; a more accurate method would consider weekends/holidays
+                             predicted_date = last_date + pd.Timedelta(days=int(predicted_change * 20 * 1.4)) # Approximate 20 trading days + weekends
+
+                             # Create a DataFrame for plotting
+                             plot_data = historical_prices.to_frame(name='Price')
+                             # Add the predicted price as a future data point
+                             plot_data.loc[predicted_date, 'Price'] = predicted_price
+
+                             # Sort the index to ensure correct plotting order
+                             plot_data = plot_data.sort_index()
+
+                             # Create the plot
+                             plt.figure(figsize=(10, 6))
+                             plt.plot(historical_prices.index, historical_prices.values, label='Historical Price', marker='o', linestyle='-')
+                             plt.plot(predicted_date, predicted_price, label='Predicted Price (Next Month)', marker='*', markersize=10, color='red')
+
+                             plt.title(f'Stock Price Prediction for {ticker}')
+                             plt.xlabel('Date')
+                             plt.ylabel('Price')
+                             plt.legend()
+                             plt.grid(True)
+                             plt.xticks(rotation=45)
+                             plt.tight_layout()
+
+                             # Save the plot to a bytes buffer and encode to base64
+                             buf = io.BytesIO()
+                             plt.savefig(buf, format='png')
+                             buf.seek(0)
+                             plot_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                             buf.close()
+                             plt.close() # Close the plot to free memory
+
+                             # Store the base64 encoded image data
+                             plot_urls[ticker] = f"data:image/png;base64,{plot_base64}"
+
+                        else:
+                             print(f"Could not retrieve historical data for plotting for {ticker}.")
+                             plot_urls[ticker] = None # Indicate no plot available
+
+
+    return render_template('predict.html', predictions=ranked_predictions_df.to_dict('index') if ranked_predictions_df is not None else None, tickers=tickers_input if request.method == 'POST' else '', plot_urls=plot_urls)
 
 
 if __name__ == '__main__':
