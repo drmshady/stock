@@ -337,7 +337,7 @@ def evaluate_models_on_tickers(tickers, trained_models, trained_lstm_models, uni
                          print(f"Error evaluating weighted ensemble for {ticker}: {e}")
 
             # else:
-            #     print(f"No test data available in the unified test set for {ticker} for weighted ensemble evaluation.")
+            #     print(f"No test data available in the unified test set for {ticker} for individual RF evaluation.")
         # else:
         #      print(f"Missing MSEs or processed data for weighted ensemble evaluation for {ticker}.")
 
