@@ -6,3 +6,4 @@ tensorflow
 gspread
 gspread-dataframe
 google-auth
+matplotlib # Added matplotlib
