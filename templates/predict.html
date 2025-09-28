@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+    <title>Stock Prediction</title>
+     <!-- Add link to static css later if needed -->
+    <!-- <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"> -->
+</head>
+<body>
+    <h1>Stock Prediction</h1>
+    <form method="post">
+        <label for="tickers">Enter stock tickers (comma-separated):</label><br>
+        <input type="text" id="tickers" name="tickers" value="{{ tickers if tickers is not none else '' }}" size="50"><br><br>
+        <input type="submit" value="Get Predictions">
+    </form>
+
+    {% if predictions %}
+        <h2>Prediction Results (Ranked)</h2>
+        {% if predictions.items() %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Ticker</th>
+                        <th>Predicted Price Change</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ticker, data in predictions.items() %}
+                    <tr>
+                        <td>{{ ticker }}</td>
+                        <td>{{ "%.6f" | format(data['Predicted_Price_Change']) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p>No valid predictions were made for the entered tickers.</p>
+        {% endif %}
+    {% endif %}
+
+    <p><a href="{{ url_for('home') }}">Go Home</a></p>
+</body>
+</html>
